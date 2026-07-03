@@ -8,6 +8,7 @@ from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
+from vllm.v1.core.ckv_event_log import emit_ckv_event
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -210,6 +211,15 @@ class KVCacheManager:
         # (which happens when the request requires prompt logprobs
         # or calls a pooling model with all pooling).
         if not self.enable_caching or request.skip_reading_prefix_cache:
+            emit_ckv_event(
+                "PREFIX_LOOKUP_DISABLED",
+                request_id=request.request_id,
+                data={
+                    "enable_caching": self.enable_caching,
+                    "skip_reading_prefix_cache": request.skip_reading_prefix_cache,
+                    "num_tokens": request.num_tokens,
+                },
+            )
             return self.empty_kv_cache_blocks, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
@@ -223,6 +233,20 @@ class KVCacheManager:
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
             )
+        )
+        emit_ckv_event(
+            "PREFIX_HIT" if num_new_computed_tokens > 0 else "PREFIX_MISS",
+            request_id=request.request_id,
+            data={
+                "num_tokens": request.num_tokens,
+                "max_cache_hit_length": max_cache_hit_length,
+                "cache_hit_tokens": num_new_computed_tokens,
+                "cache_miss_tokens": max(
+                    0, request.num_tokens - num_new_computed_tokens
+                ),
+                "computed_block_groups": [len(group) for group in computed_blocks],
+                "preempted": request.num_preemptions > 0,
+            },
         )
 
         if self.log_stats:
